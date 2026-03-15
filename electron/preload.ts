@@ -1,6 +1,4 @@
-import * as electron from 'electron'
-
-const { contextBridge, ipcRenderer } = electron
+import { contextBridge, ipcRenderer } from 'electron'
 
 // Time limit interface
 interface AppTimeLimit {
@@ -15,6 +13,7 @@ interface AppSettings {
   startWithWindows: boolean
   timeLimits: AppTimeLimit[]
   timeLimitNotificationsEnabled: boolean
+  language: 'zh-CN' | 'en-US'
 }
 
 const api = {
@@ -80,6 +79,7 @@ const api = {
         startWithWindows: false,
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
+        language: 'zh-CN',
       }
     }
   },
@@ -92,6 +92,7 @@ const api = {
         startWithWindows: false,
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
+        language: 'zh-CN',
       }
     }
   },
