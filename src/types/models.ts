@@ -52,6 +52,8 @@ export interface AppSettings {
   timeLimits: AppTimeLimit[]
   timeLimitNotificationsEnabled: boolean
   language: 'zh-CN' | 'en-US'
+  customCategories: string[]
+  customAppCategories: Record<string, string>
 }
 
 // Time limit alert that has been shown (to avoid duplicates)

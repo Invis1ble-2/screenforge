@@ -67,6 +67,8 @@ export const fetchSettings = async (): Promise<AppSettings> => {
     timeLimits: [],
     timeLimitNotificationsEnabled: true,
     language: 'zh-CN',
+    customCategories: [],
+    customAppCategories: {},
   }
 }
 
@@ -81,6 +83,8 @@ export const updateSettings = async (settings: Partial<AppSettings>): Promise<Ap
     timeLimits: [],
     timeLimitNotificationsEnabled: true,
     language: 'zh-CN',
+    customCategories: [],
+    customAppCategories: {},
   }
 }
 
