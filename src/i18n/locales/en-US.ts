@@ -162,6 +162,13 @@ export const enUS = {
       name: 'Name',
       category: 'Category',
     },
+    categoryManager: {
+      title: 'Custom App Categories',
+      subtitle: 'Assign categories to non-preset apps and add your own categories',
+      newCategoryPlaceholder: 'Enter a new category...',
+      addCategory: 'Add Category',
+      empty: 'No non-preset apps available yet',
+    },
     empty: {
       search: 'No apps match your search',
       date: 'No apps tracked for {date}',
@@ -310,6 +317,7 @@ export const enUS = {
     Utilities: 'Utilities',
     Browsers: 'Browsers',
     Entertainment: 'Entertainment',
+    Games: 'Games',
     Social: 'Social',
     System: 'System',
     Other: 'Other',

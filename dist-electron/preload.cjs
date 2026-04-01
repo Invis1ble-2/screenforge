@@ -79,7 +79,9 @@ var api = {
         startWithWindows: false,
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
-        language: "zh-CN"
+        language: "zh-CN",
+        customCategories: [],
+        customAppCategories: {}
       };
     }
   },
@@ -92,7 +94,9 @@ var api = {
         startWithWindows: false,
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
-        language: "zh-CN"
+        language: "zh-CN",
+        customCategories: [],
+        customAppCategories: {}
       };
     }
   },

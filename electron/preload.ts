@@ -15,6 +15,8 @@ interface AppSettings {
   timeLimits: AppTimeLimit[]
   timeLimitNotificationsEnabled: boolean
   language: 'zh-CN' | 'en-US'
+  customCategories: string[]
+  customAppCategories: Record<string, string>
 }
 
 const api = {
@@ -81,6 +83,8 @@ const api = {
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
         language: 'zh-CN',
+        customCategories: [],
+        customAppCategories: {},
       }
     }
   },
@@ -94,6 +98,8 @@ const api = {
         timeLimits: [],
         timeLimitNotificationsEnabled: true,
         language: 'zh-CN',
+        customCategories: [],
+        customAppCategories: {},
       }
     }
   },
