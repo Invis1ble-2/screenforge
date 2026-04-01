@@ -1,6 +1,7 @@
-import { useMemo, useState, useEffect } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import type { UsageSnapshot } from '../services/usageService'
-import type { AppInfo, AppTimeLimit } from '../types/models'
+import type { AppInfo, AppTimeLimit, UsageTimelineEntry } from '../types/models'
 import { useI18n } from '../i18n/I18nProvider'
 import { 
   getAppTotals, 
@@ -19,6 +20,186 @@ interface AppsProps {
 }
 
 type SortBy = 'time' | 'name' | 'category'
+type TimelineSegment = {
+  key: string
+  appId: string | null
+  name: string
+  category: string | null
+  color: string
+  startSecond: number
+  endSecond: number
+  seconds: number
+}
+
+const DAY_SECONDS = 24 * 60 * 60
+const MIN_TIMELINE_WIDTH = 960
+const TIMELINE_GRID_PIXEL_WIDTH = 6
+const TIMELINE_ZOOM_MIN = 0
+const TIMELINE_ZOOM_MAX = 1000
+const IDLE_TIMELINE_COLOR = '#5b6272'
+const TIMELINE_ZOOM_STOPS = [
+  { zoom: 0, seconds: 120 },
+  { zoom: 250, seconds: 90 },
+  { zoom: 500, seconds: 60 },
+  { zoom: 750, seconds: 30 },
+  { zoom: 900, seconds: 15 },
+  { zoom: 1000, seconds: 5 },
+] as const
+
+const formatClockLabel = (totalSeconds: number) => {
+  if (totalSeconds >= DAY_SECONDS) {
+    return '24:00'
+  }
+
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
+const formatResolutionLabel = (secondsPerStep: number) => {
+  if (secondsPerStep >= 3600) {
+    const hours = secondsPerStep / 3600
+    return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`
+  }
+
+  if (secondsPerStep >= 60) {
+    const minutes = secondsPerStep / 60
+    return Number.isInteger(minutes) ? `${minutes}m` : `${minutes.toFixed(1)}m`
+  }
+
+  return `${Math.round(secondsPerStep)}s`
+}
+
+const getSecondsOfDay = (isoTimestamp: string) => {
+  const date = new Date(isoTimestamp)
+  return (date.getHours() * 3600) + (date.getMinutes() * 60) + date.getSeconds()
+}
+
+const getSecondsPerGrid = (zoomValue: number) => {
+  const clampedZoom = clamp(zoomValue, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX)
+
+  for (let index = 0; index < TIMELINE_ZOOM_STOPS.length - 1; index += 1) {
+    const current = TIMELINE_ZOOM_STOPS[index]
+    const next = TIMELINE_ZOOM_STOPS[index + 1]
+
+    if (clampedZoom <= next.zoom) {
+      const progress = (clampedZoom - current.zoom) / (next.zoom - current.zoom)
+      return current.seconds + ((next.seconds - current.seconds) * progress)
+    }
+  }
+
+  return TIMELINE_ZOOM_STOPS[TIMELINE_ZOOM_STOPS.length - 1].seconds
+}
+
+const getTimelineTrackWidth = (zoomValue: number) => {
+  const secondsPerGrid = getSecondsPerGrid(zoomValue)
+  const stepCount = DAY_SECONDS / secondsPerGrid
+  return Math.max(MIN_TIMELINE_WIDTH, stepCount * TIMELINE_GRID_PIXEL_WIDTH)
+}
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const getTimelineTickInterval = (secondsPerGrid: number) => {
+  const intervals = [
+    5, 10, 30,
+    60, 2 * 60, 5 * 60, 10 * 60, 15 * 60, 30 * 60,
+    60 * 60, 2 * 60 * 60, 3 * 60 * 60, 4 * 60 * 60, 6 * 60 * 60, 12 * 60 * 60, 24 * 60 * 60,
+  ]
+  const targetInterval = secondsPerGrid * 24
+  return intervals.find((interval) => interval >= targetInterval) ?? (24 * 60 * 60)
+}
+
+const pushTimelineSegment = (
+  segments: TimelineSegment[],
+  nextSegment: Omit<TimelineSegment, 'key'>
+) => {
+  if (nextSegment.seconds <= 0) return
+
+  const previous = segments[segments.length - 1]
+  if (
+    previous &&
+    previous.appId === nextSegment.appId &&
+    previous.endSecond === nextSegment.startSecond &&
+    previous.color === nextSegment.color
+  ) {
+    previous.endSecond = nextSegment.endSecond
+    previous.seconds = previous.endSecond - previous.startSecond
+    previous.key = `${previous.appId ?? 'idle'}:${previous.startSecond}:${previous.endSecond}`
+    return
+  }
+
+  segments.push({
+    ...nextSegment,
+    key: `${nextSegment.appId ?? 'idle'}:${nextSegment.startSecond}:${nextSegment.endSecond}`,
+  })
+}
+
+const buildTimelineSegments = (
+  entries: UsageTimelineEntry[],
+  appLookup: Map<string, AppInfo>,
+  idleName: string
+) => {
+  const segments: TimelineSegment[] = []
+  let cursor = 0
+
+  const sortedEntries = [...entries].sort((a, b) => a.startAt.localeCompare(b.startAt))
+
+  for (const entry of sortedEntries) {
+    const app = appLookup.get(entry.appId)
+    const startSecond = Math.max(cursor, Math.max(0, Math.min(DAY_SECONDS, getSecondsOfDay(entry.startAt))))
+    const endSecond = Math.max(startSecond, Math.min(DAY_SECONDS, getSecondsOfDay(entry.endAt)))
+
+    if (startSecond > cursor) {
+      pushTimelineSegment(segments, {
+        appId: null,
+        name: idleName,
+        category: null,
+        color: IDLE_TIMELINE_COLOR,
+        startSecond: cursor,
+        endSecond: startSecond,
+        seconds: startSecond - cursor,
+      })
+    }
+
+    pushTimelineSegment(segments, {
+      appId: entry.appId,
+      name: app?.name ?? entry.appId,
+      category: app?.category ?? null,
+      color: app?.color ?? IDLE_TIMELINE_COLOR,
+      startSecond,
+      endSecond,
+      seconds: endSecond - startSecond,
+    })
+    cursor = Math.max(cursor, endSecond)
+  }
+
+  if (cursor < DAY_SECONDS) {
+    pushTimelineSegment(segments, {
+      appId: null,
+      name: idleName,
+      category: null,
+      color: IDLE_TIMELINE_COLOR,
+      startSecond: cursor,
+      endSecond: DAY_SECONDS,
+      seconds: DAY_SECONDS - cursor,
+    })
+  }
+
+  if (segments.length === 0) {
+    return [{
+      key: 'idle:0:86400',
+      appId: null,
+      name: idleName,
+      category: null,
+      color: IDLE_TIMELINE_COLOR,
+      startSecond: 0,
+      endSecond: DAY_SECONDS,
+      seconds: DAY_SECONDS,
+    }]
+  }
+
+  return segments
+}
 
 const Apps = ({ snapshot }: AppsProps) => {
   const { t, formatSeconds, formatDateLabel, translateCategory } = useI18n()
@@ -31,6 +212,15 @@ const Apps = ({ snapshot }: AppsProps) => {
   const [customCategories, setCustomCategories] = useState<string[]>([])
   const [customAppCategories, setCustomAppCategories] = useState<Record<string, string>>({})
   const [newCategoryInput, setNewCategoryInput] = useState('')
+  const [timelineZoomValue, setTimelineZoomValue] = useState(700)
+  const [hoveredTimelineKey, setHoveredTimelineKey] = useState<string | null>(null)
+  const [isTimelineDragging, setIsTimelineDragging] = useState(false)
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null)
+  const timelineDragStateRef = useRef<{ startX: number; startScrollLeft: number } | null>(null)
+  const timelineScrollLeftRef = useRef(0)
+  const timelineZoomValueRef = useRef(timelineZoomValue)
+  const timelineTrackWidthRef = useRef(MIN_TIMELINE_WIDTH)
+  const pendingTimelineScrollLeftRef = useRef<number | null>(null)
 
   // Load time limits on mount
   useEffect(() => {
@@ -138,6 +328,127 @@ const Apps = ({ snapshot }: AppsProps) => {
     }
   }, [activeSelectedDate, snapshot, effectiveApps, sortBy, search, translateCategory])
 
+  const timelineResolution = getSecondsPerGrid(timelineZoomValue)
+  const timelineStepCount = DAY_SECONDS / timelineResolution
+  const timelineTrackWidth = getTimelineTrackWidth(timelineZoomValue)
+  const timelineGridSize = timelineTrackWidth / timelineStepCount
+
+  useEffect(() => {
+    timelineZoomValueRef.current = timelineZoomValue
+  }, [timelineZoomValue])
+
+  useEffect(() => {
+    timelineTrackWidthRef.current = timelineTrackWidth
+  }, [timelineTrackWidth])
+
+  useLayoutEffect(() => {
+    const viewport = timelineViewportRef.current
+    const pendingScrollLeft = pendingTimelineScrollLeftRef.current
+    if (!viewport || pendingScrollLeft === null) return
+
+    const maxScrollLeft = Math.max(0, timelineTrackWidth - viewport.clientWidth)
+    const nextScrollLeft = clamp(pendingScrollLeft, 0, maxScrollLeft)
+    viewport.scrollLeft = nextScrollLeft
+    timelineScrollLeftRef.current = nextScrollLeft
+    pendingTimelineScrollLeftRef.current = null
+  }, [timelineTrackWidth])
+
+  const timelineSegments = useMemo(() => {
+    const appLookup = new Map(effectiveApps.map((app) => [app.id, app]))
+    const dateEntries = (snapshot?.timelineEntries ?? []).filter((entry) => entry.date === activeSelectedDate)
+    return buildTimelineSegments(dateEntries, appLookup, t('apps.timeline.idle'))
+  }, [snapshot, activeSelectedDate, effectiveApps, t])
+
+  const timelineTicks = useMemo(() => {
+    const interval = getTimelineTickInterval(timelineResolution)
+    const ticks: number[] = []
+
+    for (let second = 0; second <= DAY_SECONDS; second += interval) {
+      ticks.push(second)
+    }
+
+    if (ticks[ticks.length - 1] !== DAY_SECONDS) {
+      ticks.push(DAY_SECONDS)
+    }
+
+    return ticks
+  }, [timelineResolution])
+
+  const hoveredTimelineSegment = useMemo(
+    () => timelineSegments.find((segment) => segment.key === hoveredTimelineKey) ?? null,
+    [timelineSegments, hoveredTimelineKey]
+  )
+
+  const timelineSummarySegment = hoveredTimelineSegment ?? timelineSegments.find((segment) => segment.appId !== null) ?? timelineSegments[0]
+
+  useEffect(() => {
+    const viewport = timelineViewportRef.current
+    if (!viewport) return
+
+    const handleScroll = () => {
+      timelineScrollLeftRef.current = viewport.scrollLeft
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+
+      if (Math.abs(event.deltaY) >= Math.abs(event.deltaX)) {
+        const rect = viewport.getBoundingClientRect()
+        const anchorOffsetX = clamp(event.clientX - rect.left, 0, rect.width)
+        const anchorSecond = ((timelineScrollLeftRef.current + anchorOffsetX) / timelineTrackWidthRef.current) * DAY_SECONDS
+        const nextZoom = clamp(timelineZoomValueRef.current - (event.deltaY * 0.6), TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX)
+        const nextTrackWidth = getTimelineTrackWidth(nextZoom)
+        const maxScrollLeft = Math.max(0, nextTrackWidth - viewport.clientWidth)
+        const nextScrollLeft = clamp(((anchorSecond / DAY_SECONDS) * nextTrackWidth) - anchorOffsetX, 0, maxScrollLeft)
+
+        pendingTimelineScrollLeftRef.current = nextScrollLeft
+        timelineScrollLeftRef.current = nextScrollLeft
+        timelineTrackWidthRef.current = nextTrackWidth
+        timelineZoomValueRef.current = nextZoom
+        setTimelineZoomValue(nextZoom)
+        return
+      }
+
+      viewport.scrollLeft += event.deltaX
+      timelineScrollLeftRef.current = viewport.scrollLeft
+    }
+
+    viewport.addEventListener('scroll', handleScroll)
+    viewport.addEventListener('wheel', handleWheel, { passive: false })
+
+    return () => {
+      viewport.removeEventListener('scroll', handleScroll)
+      viewport.removeEventListener('wheel', handleWheel)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTimelineDragging) return
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const viewport = timelineViewportRef.current
+      const dragState = timelineDragStateRef.current
+      if (!viewport || !dragState) return
+
+      const deltaX = event.clientX - dragState.startX
+      viewport.scrollLeft = dragState.startScrollLeft - deltaX
+      timelineScrollLeftRef.current = viewport.scrollLeft
+    }
+
+    const handleMouseUp = () => {
+      timelineDragStateRef.current = null
+      setIsTimelineDragging(false)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isTimelineDragging])
+
   const categoryOptions = useMemo(() => {
     const defaults = [
       'Productivity',
@@ -222,6 +533,21 @@ const Apps = ({ snapshot }: AppsProps) => {
 
   const getAppLimit = (appId: string): AppTimeLimit | undefined => {
     return timeLimits.find((l) => l.appId === appId)
+  }
+
+  const handleTimelineMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+
+    const viewport = timelineViewportRef.current
+    if (!viewport) return
+
+    event.preventDefault()
+    timelineDragStateRef.current = {
+      startX: event.clientX,
+      startScrollLeft: viewport.scrollLeft,
+    }
+    setHoveredTimelineKey(null)
+    setIsTimelineDragging(true)
   }
 
   const isToday = activeSelectedDate === getTodayDateString()
@@ -440,6 +766,86 @@ const Apps = ({ snapshot }: AppsProps) => {
             )
           })
         )}
+      </section>
+
+      <section className="apps-timeline">
+        <div className="apps-timeline__header">
+          <div>
+            <div className="apps-timeline__title">{t('apps.timeline.title')}</div>
+            <div className="apps-timeline__sub">{t('apps.timeline.subtitle', { date: formatDateLabel(activeSelectedDate) })}</div>
+          </div>
+          <div className="apps-timeline__zoom">
+            <span className="apps-timeline__zoom-value">
+              {t('apps.timeline.zoomValue', { value: formatResolutionLabel(timelineResolution) })}
+            </span>
+          </div>
+        </div>
+
+        <div className="apps-timeline__summary">
+          <span
+            className="apps-timeline__summary-dot"
+            style={{ background: timelineSummarySegment?.color ?? IDLE_TIMELINE_COLOR }}
+          />
+          <span className="apps-timeline__summary-name">
+            {timelineSummarySegment?.name ?? t('apps.timeline.idle')}
+          </span>
+          <span className="apps-timeline__summary-meta">
+            {timelineSummarySegment?.category ? translateCategory(timelineSummarySegment.category) : t('apps.timeline.idle')}
+          </span>
+          <span className="apps-timeline__summary-meta">
+            {timelineSummarySegment
+              ? `${formatClockLabel(timelineSummarySegment.startSecond)} - ${formatClockLabel(timelineSummarySegment.endSecond)}`
+              : '00:00 - 24:00'}
+          </span>
+          <span className="apps-timeline__summary-meta">
+            {timelineSummarySegment ? formatSeconds(timelineSummarySegment.seconds) : formatSeconds(0)}
+          </span>
+        </div>
+
+        <div
+          ref={timelineViewportRef}
+          className={`apps-timeline__viewport ${isTimelineDragging ? 'apps-timeline__viewport--dragging' : ''}`}
+          onMouseDown={handleTimelineMouseDown}
+        >
+          <div className="apps-timeline__axis" style={{ width: `${timelineTrackWidth}px` }}>
+            {timelineTicks.map((tick) => (
+              <div
+                key={tick}
+                className="apps-timeline__axis-tick"
+                style={{ left: `${(tick / DAY_SECONDS) * 100}%` }}
+              >
+                <span className="apps-timeline__axis-line" />
+                <span className="apps-timeline__axis-label">{formatClockLabel(tick)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className="apps-timeline__track"
+            style={{
+              width: `${timelineTrackWidth}px`,
+              backgroundSize: `${timelineGridSize}px 100%`,
+            }}
+            onMouseLeave={() => setHoveredTimelineKey(null)}
+          >
+            {timelineSegments.map((segment) => (
+              <button
+                key={segment.key}
+                type="button"
+                className={`apps-timeline__segment ${segment.appId ? '' : 'apps-timeline__segment--idle'}`}
+                style={{
+                  left: `${(segment.startSecond / DAY_SECONDS) * timelineTrackWidth}px`,
+                  width: `${Math.max(1, ((segment.endSecond - segment.startSecond) / DAY_SECONDS) * timelineTrackWidth)}px`,
+                  background: segment.color,
+                }}
+                title={`${segment.name} | ${formatClockLabel(segment.startSecond)} - ${formatClockLabel(segment.endSecond)} | ${formatSeconds(segment.seconds)}`}
+                aria-label={`${segment.name} ${formatClockLabel(segment.startSecond)} - ${formatClockLabel(segment.endSecond)}`}
+                onMouseEnter={() => setHoveredTimelineKey(segment.key)}
+                onFocus={() => setHoveredTimelineKey(segment.key)}
+              />
+            ))}
+          </div>
+        </div>
       </section>
     </>
   )

@@ -21,6 +21,14 @@ export interface UsageEntry {
   notifications: number
 }
 
+export interface UsageTimelineEntry {
+  date: string
+  appId: string
+  startAt: string
+  endAt: string
+  seconds: number
+}
+
 interface ActiveAppSample {
   process: string
   title: string
@@ -33,11 +41,18 @@ interface UsageTracker {
   getSnapshot: () => {
     apps: AppInfo[]
     usageEntries: UsageEntry[]
+    timelineEntries: UsageTimelineEntry[]
     activeAppId: string | null
     runningApps: RunningAppSummary[]
   }
   clearData: () => void
   dispose: () => void
+}
+
+interface TimelineSegment {
+  appId: string
+  startMs: number
+  endMs: number
 }
 
 export interface RunningAppSummary {
@@ -365,6 +380,19 @@ const getTodayDateString = (): string => {
   return `${year}-${month}-${day}`
 }
 
+const getDateStringForTimestamp = (timestampMs: number): string => {
+  const date = new Date(timestampMs)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const getNextDayStartTimestamp = (timestampMs: number): number => {
+  const date = new Date(timestampMs)
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime()
+}
+
 const toDisplayName = (value: string) =>
   value
     .replace(/[-_]+/g, ' ')
@@ -375,31 +403,76 @@ const getDataPath = () => {
   return path.join(userDataPath, 'usage-data.json')
 }
 
-const loadPersistedData = (): Map<string, number> => {
+const loadPersistedState = (): { totals: Map<string, number>; timelineByDate: Map<string, TimelineSegment[]> } => {
   const dataPath = getDataPath()
-  const map = new Map<string, number>()
+  const totals = new Map<string, number>()
+  const timelineByDate = new Map<string, TimelineSegment[]>()
   
   try {
     if (fs.existsSync(dataPath)) {
       const raw = fs.readFileSync(dataPath, 'utf8')
-      const data = JSON.parse(raw) as Record<string, number>
-      for (const [key, value] of Object.entries(data)) {
-        map.set(key, value)
+      const parsed = JSON.parse(raw) as
+        | Record<string, number>
+        | {
+            totals?: Record<string, number>
+            timelineByDate?: Record<string, Array<{ appId: string; startMs: number; endMs: number }>>
+          }
+
+      const totalsSource =
+        parsed && typeof parsed === 'object' && 'totals' in parsed
+          ? (parsed.totals ?? {})
+          : (parsed as Record<string, number>)
+
+      for (const [key, value] of Object.entries(totalsSource)) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) continue
+        totals.set(key, value)
+      }
+
+      if (parsed && typeof parsed === 'object' && 'timelineByDate' in parsed && parsed.timelineByDate) {
+        for (const [date, segments] of Object.entries(parsed.timelineByDate)) {
+          if (!Array.isArray(segments)) continue
+          const sanitized: TimelineSegment[] = segments
+            .filter(
+              (segment): segment is { appId: string; startMs: number; endMs: number } =>
+                Boolean(
+                  segment &&
+                    typeof segment.appId === 'string' &&
+                    typeof segment.startMs === 'number' &&
+                    typeof segment.endMs === 'number'
+                )
+            )
+            .map((segment) => ({
+              appId: segment.appId,
+              startMs: Math.floor(segment.startMs),
+              endMs: Math.floor(segment.endMs),
+            }))
+            .filter((segment) => segment.endMs > segment.startMs)
+
+          if (sanitized.length > 0) {
+            timelineByDate.set(date, sanitized)
+          }
+        }
       }
     }
   } catch {
     // Ignore load errors, start fresh
   }
   
-  return map
+  return { totals, timelineByDate }
 }
 
-const savePersistedData = (totals: Map<string, number>) => {
+const savePersistedState = (totals: Map<string, number>, timelineByDate: Map<string, TimelineSegment[]>) => {
   const dataPath = getDataPath()
-  const data: Record<string, number> = {}
+  const persistedTotals: Record<string, number> = {}
+  const persistedTimelineByDate: Record<string, TimelineSegment[]> = {}
   
   for (const [key, value] of totals.entries()) {
-    data[key] = value
+    persistedTotals[key] = value
+  }
+
+  for (const [date, segments] of timelineByDate.entries()) {
+    if (segments.length === 0) continue
+    persistedTimelineByDate[date] = segments
   }
   
   try {
@@ -407,7 +480,17 @@ const savePersistedData = (totals: Map<string, number>) => {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true })
     }
-    fs.writeFileSync(dataPath, JSON.stringify(data, null, 2))
+    fs.writeFileSync(
+      dataPath,
+      JSON.stringify(
+        {
+          totals: persistedTotals,
+          timelineByDate: persistedTimelineByDate,
+        },
+        null,
+        2
+      )
+    )
   } catch {
     // Ignore save errors
   }
@@ -565,7 +648,9 @@ export const createUsageTracker = (): UsageTracker => {
   }
 
   // Load persisted data
-  const totals = loadPersistedData()
+  const persisted = loadPersistedState()
+  const totals = persisted.totals
+  const timelineByDate = persisted.timelineByDate
   
   let interval: NodeJS.Timeout | null = null
   let saveInterval: NodeJS.Timeout | null = null
@@ -575,11 +660,38 @@ export const createUsageTracker = (): UsageTracker => {
   let activeAppId: string | null = null
   let runningApps: RunningAppSummary[] = []
 
-  const record = (appId: string | null, deltaSeconds: number) => {
+  const appendTimelineSegment = (date: string, appId: string, startMs: number, endMs: number) => {
+    if (endMs <= startMs) return
+    const list = timelineByDate.get(date) ?? []
+    const last = list[list.length - 1]
+    if (last && last.appId === appId && Math.abs(last.endMs - startMs) <= 1500) {
+      last.endMs = Math.max(last.endMs, endMs)
+    } else {
+      list.push({ appId, startMs, endMs })
+    }
+    timelineByDate.set(date, list)
+  }
+
+  const recordTimeline = (appId: string, deltaSeconds: number, endTimestampMs: number) => {
+    if (deltaSeconds <= 0) return
+    let segmentStartMs = Math.max(0, Math.floor(endTimestampMs - deltaSeconds * 1000))
+    const segmentEndMs = Math.max(segmentStartMs, Math.floor(endTimestampMs))
+
+    while (segmentStartMs < segmentEndMs) {
+      const date = getDateStringForTimestamp(segmentStartMs)
+      const dayEndMs = getNextDayStartTimestamp(segmentStartMs)
+      const partialEndMs = Math.min(segmentEndMs, dayEndMs)
+      appendTimelineSegment(date, appId, segmentStartMs, partialEndMs)
+      segmentStartMs = partialEndMs
+    }
+  }
+
+  const record = (appId: string | null, deltaSeconds: number, endTimestampMs: number) => {
     if (!appId || deltaSeconds <= 0) return
     const today = getTodayDateString()
     const key = `${today}:${appId}`
     totals.set(key, (totals.get(key) ?? 0) + deltaSeconds)
+    recordTimeline(appId, deltaSeconds, endTimestampMs)
   }
 
   const resolveAppId = (active: ActiveAppSample | null): string | null => {
@@ -635,7 +747,7 @@ export const createUsageTracker = (): UsageTracker => {
     // Cap at 60 seconds to avoid huge jumps if the app was suspended
     if (lastAppId && elapsedSeconds > 0) {
       const cappedSeconds = Math.min(elapsedSeconds, 60)
-      record(lastAppId, cappedSeconds)
+      record(lastAppId, cappedSeconds, now)
     }
 
     const active = await getActiveApp()
@@ -656,13 +768,14 @@ export const createUsageTracker = (): UsageTracker => {
 
   // Save data every 30 seconds
   saveInterval = setInterval(() => {
-    savePersistedData(totals)
+    savePersistedState(totals, timelineByDate)
   }, 30000)
 
   return {
     apps: Array.from(appLookup.values()),
     getSnapshot: () => {
       const entries: UsageEntry[] = []
+      const timelineEntries: UsageTimelineEntry[] = []
       const usedAppIds = new Set<string>()
       
       for (const [key, seconds] of totals.entries()) {
@@ -684,16 +797,40 @@ export const createUsageTracker = (): UsageTracker => {
         })
       }
 
+      for (const [date, segments] of timelineByDate.entries()) {
+        for (const segment of segments) {
+          ensureDynamicAppInfo(segment.appId)
+          usedAppIds.add(segment.appId)
+          const seconds = Math.max(0, Math.floor((segment.endMs - segment.startMs) / 1000))
+          if (seconds <= 0) continue
+          timelineEntries.push({
+            date,
+            appId: segment.appId,
+            startAt: new Date(segment.startMs).toISOString(),
+            endAt: new Date(segment.endMs).toISOString(),
+            seconds,
+          })
+        }
+      }
+
+      timelineEntries.sort((a, b) => {
+        if (a.date === b.date) {
+          return a.startAt.localeCompare(b.startAt)
+        }
+        return a.date.localeCompare(b.date)
+      })
+
       // Only return apps that have been used
       const apps = Array.from(appLookup.values()).filter(
         (app) => usedAppIds.has(app.id)
       )
 
-      return { apps, usageEntries: entries, activeAppId, runningApps }
+      return { apps, usageEntries: entries, timelineEntries, activeAppId, runningApps }
     },
     clearData: () => {
       totals.clear()
-      savePersistedData(totals)
+      timelineByDate.clear()
+      savePersistedState(totals, timelineByDate)
     },
     dispose: () => {
       if (interval) {
@@ -706,7 +843,7 @@ export const createUsageTracker = (): UsageTracker => {
       }
       clearInterval(runningAppsInterval)
       // Save on dispose
-      savePersistedData(totals)
+      savePersistedState(totals, timelineByDate)
     },
   }
 }

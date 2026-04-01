@@ -169,6 +169,13 @@ export const enUS = {
       addCategory: 'Add Category',
       empty: 'No non-preset apps available yet',
     },
+    timeline: {
+      title: 'Usage Timeline',
+      subtitle: 'App activity periods for {date}',
+      empty: 'No timeline data available for this date',
+      idle: 'Idle / Off',
+      zoomValue: 'Scale {value}',
+    },
     empty: {
       search: 'No apps match your search',
       date: 'No apps tracked for {date}',

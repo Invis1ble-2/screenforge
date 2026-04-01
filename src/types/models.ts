@@ -17,6 +17,14 @@ export interface UsageEntry {
   notifications: number
 }
 
+export interface UsageTimelineEntry {
+  date: string
+  appId: string
+  startAt: string
+  endAt: string
+  seconds: number
+}
+
 export interface RunningAppSummary {
   process: string
   appId: string

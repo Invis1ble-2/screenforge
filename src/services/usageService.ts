@@ -1,9 +1,10 @@
-import type { AppInfo, SuggestionItem, UsageEntry, NotificationSummary, RunningAppSummary, AppTimeLimit, AppSettings } from '../types/models'
+import type { AppInfo, SuggestionItem, UsageEntry, UsageTimelineEntry, NotificationSummary, RunningAppSummary, AppTimeLimit, AppSettings } from '../types/models'
 
 export interface UsageSnapshot {
   generatedAt: string
   apps: AppInfo[]
   usageEntries: UsageEntry[]
+  timelineEntries: UsageTimelineEntry[]
   activeAppId?: string | null
   runningApps?: RunningAppSummary[]
 }
@@ -17,6 +18,7 @@ export const fetchUsageSnapshot = async (): Promise<UsageSnapshot> => {
     generatedAt: new Date().toISOString(),
     apps: [],
     usageEntries: [],
+    timelineEntries: [],
     activeAppId: null,
     runningApps: [],
   }
@@ -31,6 +33,7 @@ export const clearUsageData = async (): Promise<UsageSnapshot> => {
     generatedAt: new Date().toISOString(),
     apps: [],
     usageEntries: [],
+    timelineEntries: [],
     activeAppId: null,
     runningApps: [],
   }

@@ -26,6 +26,7 @@ var api = {
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         apps: [],
         usageEntries: [],
+        timelineEntries: [],
         activeAppId: null,
         runningApps: []
       };
@@ -46,6 +47,7 @@ var api = {
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         apps: [],
         usageEntries: [],
+        timelineEntries: [],
         activeAppId: null,
         runningApps: []
       };

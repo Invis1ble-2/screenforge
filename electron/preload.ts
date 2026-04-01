@@ -29,6 +29,7 @@ const api = {
         generatedAt: new Date().toISOString(),
         apps: [],
         usageEntries: [],
+        timelineEntries: [],
         activeAppId: null,
         runningApps: [],
       }
@@ -49,6 +50,7 @@ const api = {
         generatedAt: new Date().toISOString(),
         apps: [],
         usageEntries: [],
+        timelineEntries: [],
         activeAppId: null,
         runningApps: [],
       }

@@ -680,38 +680,84 @@ var getTodayDateString2 = () => {
   const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 };
+var getDateStringForTimestamp = (timestampMs) => {
+  const date = new Date(timestampMs);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+var getNextDayStartTimestamp = (timestampMs) => {
+  const date = new Date(timestampMs);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
+};
 var toDisplayName = (value) => value.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 var getDataPath2 = () => {
   const userDataPath = import_electron2.app.getPath("userData");
   return path2.join(userDataPath, "usage-data.json");
 };
-var loadPersistedData2 = () => {
+var loadPersistedState = () => {
   const dataPath = getDataPath2();
-  const map = /* @__PURE__ */ new Map();
+  const totals = /* @__PURE__ */ new Map();
+  const timelineByDate = /* @__PURE__ */ new Map();
   try {
     if (fs2.existsSync(dataPath)) {
       const raw = fs2.readFileSync(dataPath, "utf8");
-      const data = JSON.parse(raw);
-      for (const [key, value] of Object.entries(data)) {
-        map.set(key, value);
+      const parsed = JSON.parse(raw);
+      const totalsSource = parsed && typeof parsed === "object" && "totals" in parsed ? parsed.totals ?? {} : parsed;
+      for (const [key, value] of Object.entries(totalsSource)) {
+        if (typeof value !== "number" || !Number.isFinite(value)) continue;
+        totals.set(key, value);
+      }
+      if (parsed && typeof parsed === "object" && "timelineByDate" in parsed && parsed.timelineByDate) {
+        for (const [date, segments] of Object.entries(parsed.timelineByDate)) {
+          if (!Array.isArray(segments)) continue;
+          const sanitized = segments.filter(
+            (segment) => Boolean(
+              segment && typeof segment.appId === "string" && typeof segment.startMs === "number" && typeof segment.endMs === "number"
+            )
+          ).map((segment) => ({
+            appId: segment.appId,
+            startMs: Math.floor(segment.startMs),
+            endMs: Math.floor(segment.endMs)
+          })).filter((segment) => segment.endMs > segment.startMs);
+          if (sanitized.length > 0) {
+            timelineByDate.set(date, sanitized);
+          }
+        }
       }
     }
   } catch {
   }
-  return map;
+  return { totals, timelineByDate };
 };
-var savePersistedData2 = (totals) => {
+var savePersistedState = (totals, timelineByDate) => {
   const dataPath = getDataPath2();
-  const data = {};
+  const persistedTotals = {};
+  const persistedTimelineByDate = {};
   for (const [key, value] of totals.entries()) {
-    data[key] = value;
+    persistedTotals[key] = value;
+  }
+  for (const [date, segments] of timelineByDate.entries()) {
+    if (segments.length === 0) continue;
+    persistedTimelineByDate[date] = segments;
   }
   try {
     const dir = path2.dirname(dataPath);
     if (!fs2.existsSync(dir)) {
       fs2.mkdirSync(dir, { recursive: true });
     }
-    fs2.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+    fs2.writeFileSync(
+      dataPath,
+      JSON.stringify(
+        {
+          totals: persistedTotals,
+          timelineByDate: persistedTimelineByDate
+        },
+        null,
+        2
+      )
+    );
   } catch {
   }
 };
@@ -852,7 +898,9 @@ var createUsageTracker = () => {
       color: "#6b7280"
     });
   };
-  const totals = loadPersistedData2();
+  const persisted = loadPersistedState();
+  const totals = persisted.totals;
+  const timelineByDate = persisted.timelineByDate;
   let interval = null;
   let saveInterval = null;
   const tickMs = 1e3;
@@ -860,11 +908,35 @@ var createUsageTracker = () => {
   let lastTimestamp = Date.now();
   let activeAppId = null;
   let runningApps = [];
-  const record = (appId, deltaSeconds) => {
+  const appendTimelineSegment = (date, appId, startMs, endMs) => {
+    if (endMs <= startMs) return;
+    const list = timelineByDate.get(date) ?? [];
+    const last = list[list.length - 1];
+    if (last && last.appId === appId && Math.abs(last.endMs - startMs) <= 1500) {
+      last.endMs = Math.max(last.endMs, endMs);
+    } else {
+      list.push({ appId, startMs, endMs });
+    }
+    timelineByDate.set(date, list);
+  };
+  const recordTimeline = (appId, deltaSeconds, endTimestampMs) => {
+    if (deltaSeconds <= 0) return;
+    let segmentStartMs = Math.max(0, Math.floor(endTimestampMs - deltaSeconds * 1e3));
+    const segmentEndMs = Math.max(segmentStartMs, Math.floor(endTimestampMs));
+    while (segmentStartMs < segmentEndMs) {
+      const date = getDateStringForTimestamp(segmentStartMs);
+      const dayEndMs = getNextDayStartTimestamp(segmentStartMs);
+      const partialEndMs = Math.min(segmentEndMs, dayEndMs);
+      appendTimelineSegment(date, appId, segmentStartMs, partialEndMs);
+      segmentStartMs = partialEndMs;
+    }
+  };
+  const record = (appId, deltaSeconds, endTimestampMs) => {
     if (!appId || deltaSeconds <= 0) return;
     const today = getTodayDateString2();
     const key = `${today}:${appId}`;
     totals.set(key, (totals.get(key) ?? 0) + deltaSeconds);
+    recordTimeline(appId, deltaSeconds, endTimestampMs);
   };
   const resolveAppId = (active) => {
     if (!active?.process) return null;
@@ -903,7 +975,7 @@ var createUsageTracker = () => {
     lastTimestamp = now;
     if (lastAppId && elapsedSeconds > 0) {
       const cappedSeconds = Math.min(elapsedSeconds, 60);
-      record(lastAppId, cappedSeconds);
+      record(lastAppId, cappedSeconds, now);
     }
     const active = await getActiveApp();
     activeAppId = resolveAppId(active);
@@ -916,12 +988,13 @@ var createUsageTracker = () => {
   }, 5e3);
   refreshRunningApps();
   saveInterval = setInterval(() => {
-    savePersistedData2(totals);
+    savePersistedState(totals, timelineByDate);
   }, 3e4);
   return {
     apps: Array.from(appLookup.values()),
     getSnapshot: () => {
       const entries = [];
+      const timelineEntries = [];
       const usedAppIds = /* @__PURE__ */ new Set();
       for (const [key, seconds] of totals.entries()) {
         const firstColonIndex = key.indexOf(":");
@@ -941,14 +1014,36 @@ var createUsageTracker = () => {
           notifications: 0
         });
       }
+      for (const [date, segments] of timelineByDate.entries()) {
+        for (const segment of segments) {
+          ensureDynamicAppInfo(segment.appId);
+          usedAppIds.add(segment.appId);
+          const seconds = Math.max(0, Math.floor((segment.endMs - segment.startMs) / 1e3));
+          if (seconds <= 0) continue;
+          timelineEntries.push({
+            date,
+            appId: segment.appId,
+            startAt: new Date(segment.startMs).toISOString(),
+            endAt: new Date(segment.endMs).toISOString(),
+            seconds
+          });
+        }
+      }
+      timelineEntries.sort((a, b) => {
+        if (a.date === b.date) {
+          return a.startAt.localeCompare(b.startAt);
+        }
+        return a.date.localeCompare(b.date);
+      });
       const apps = Array.from(appLookup.values()).filter(
         (app4) => usedAppIds.has(app4.id)
       );
-      return { apps, usageEntries: entries, activeAppId, runningApps };
+      return { apps, usageEntries: entries, timelineEntries, activeAppId, runningApps };
     },
     clearData: () => {
       totals.clear();
-      savePersistedData2(totals);
+      timelineByDate.clear();
+      savePersistedState(totals, timelineByDate);
     },
     dispose: () => {
       if (interval) {
@@ -960,7 +1055,7 @@ var createUsageTracker = () => {
         saveInterval = null;
       }
       clearInterval(runningAppsInterval);
-      savePersistedData2(totals);
+      savePersistedState(totals, timelineByDate);
     }
   };
 };
@@ -1134,6 +1229,13 @@ var enUS = {
       newCategoryPlaceholder: "Enter a new category...",
       addCategory: "Add Category",
       empty: "No non-preset apps available yet"
+    },
+    timeline: {
+      title: "Usage Timeline",
+      subtitle: "App activity periods for {date}",
+      empty: "No timeline data available for this date",
+      idle: "Idle / Off",
+      zoomValue: "Scale {value}"
     },
     empty: {
       search: "No apps match your search",
@@ -1460,6 +1562,13 @@ var zhCN = {
       newCategoryPlaceholder: "\u8F93\u5165\u65B0\u5206\u7C7B\u540D\u79F0...",
       addCategory: "\u6DFB\u52A0\u5206\u7C7B",
       empty: "\u6682\u65E0\u975E\u9884\u8BBE\u5E94\u7528\u53EF\u5206\u7C7B"
+    },
+    timeline: {
+      title: "\u4F7F\u7528\u65F6\u95F4\u7EBF",
+      subtitle: "{date} \u7684\u5E94\u7528\u4F7F\u7528\u65F6\u6BB5",
+      empty: "\u8BE5\u65E5\u671F\u6682\u65E0\u53EF\u663E\u793A\u7684\u65F6\u95F4\u7EBF\u6570\u636E",
+      idle: "\u7A7A\u95F2/\u5173\u673A",
+      zoomValue: "\u523B\u5EA6 {value}"
     },
     empty: {
       search: "\u6CA1\u6709\u5339\u914D\u641C\u7D22\u6761\u4EF6\u7684\u5E94\u7528",

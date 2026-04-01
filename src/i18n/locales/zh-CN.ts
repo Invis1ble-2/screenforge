@@ -169,6 +169,13 @@ export const zhCN = {
       addCategory: '添加分类',
       empty: '暂无非预设应用可分类',
     },
+    timeline: {
+      title: '使用时间线',
+      subtitle: '{date} 的应用使用时段',
+      empty: '该日期暂无可显示的时间线数据',
+      idle: '空闲/关机',
+      zoomValue: '刻度 {value}',
+    },
     empty: {
       search: '没有匹配搜索条件的应用',
       date: '{date} 暂无应用使用记录',
